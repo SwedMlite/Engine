@@ -6,6 +6,7 @@
 #include <SDL3/SDL_main.h>
 #include <vulkan/vulkan_raii.hpp>
 #include <optional>
+#include <cmath>
 
 static SDL_Window* window = NULL;
 constexpr auto VULKAN_VERSION{ vk::makeApiVersion(0, 1, 1, 0) };
@@ -91,7 +92,7 @@ void PickPhysicalDevice(VulkanState* vulkanState) {
 		SDL_Log("No Vulkan devices found: %s", SDL_GetError());
 	}
 	vulkanState->physicalDevice.emplace(*vulkanState->instance, *physicalDevices.front());
-	SDL_Log("GPU: %s", vulkanState->physicalDevice->getProperties().deviceName);
+	SDL_Log("GPU: %s", vulkanState->physicalDevice->getProperties().deviceName.data());
 	vulkanState->graphicsQueueFamilyIndex = 0;
 }
 
