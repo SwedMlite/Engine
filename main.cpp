@@ -1,12 +1,15 @@
 ﻿#define VULKAN_HPP_ENABLE_DYNAMIC_LOADER_TOOL 0
-#define SDL_MAIN_USE_CALLBACKS 1  /* use the callbacks instead of main() */
+#define SDL_MAIN_USE_CALLBACKS 1
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <SDL3/SDL_main.h>
 #include <vulkan/vulkan_raii.hpp>
 #include <optional>
+
 static SDL_Window* window = NULL;
 constexpr auto VULKAN_VERSION{ vk::makeApiVersion(0, 1, 1, 0) };
+
 struct VulkanState {
 	std::optional<vk::raii::Context> context{};
 	std::optional<vk::raii::Instance> instance;
@@ -15,7 +18,7 @@ struct VulkanState {
 	uint32_t graphicsQueueFamilyIndex{};
 	std::optional<vk::raii::Device> device;
 	std::optional<vk::raii::Queue> graphicsQueue{};
-	
+
 	std::optional<vk::raii::CommandPool> commandPool{};
 	std::vector<vk::raii::CommandBuffer> commandBuffers{};
 	std::vector<vk::raii::Semaphore> imageAvailableSemaphores{};
@@ -25,7 +28,6 @@ struct VulkanState {
 	std::optional<vk::raii::SwapchainKHR> swapchain;
 	std::vector<vk::Image> swapchainImages;
 	vk::Extent2D swapchainExtent;
-	vk::Format swapchainImageFormat{ vk::Format::eB8G8R8A8Srgb };
 	uint32_t currentSwapchainImageIndex;
 
 };
@@ -123,11 +125,13 @@ void RecreateSwapchain(VulkanState* vulkanState) {
 
 	std::vector<vk::SurfaceFormatKHR> surfaceFormats = vulkanState->physicalDevice->getSurfaceFormatsKHR(*vulkanState->surface);
 	vk::Format selectedFormat = surfaceFormats[0].format;
-	for (auto& format : surfaceFormats)
-	{
-		for (int i = 0; i < preferedSurfaceFormats.size(); i++)
-		{
-			selectedFormat = surfaceFormats[i].format;
+
+	for (const auto& availableFormat : surfaceFormats) {
+		for (const auto& preferredFormat : preferedSurfaceFormats) {
+			if (availableFormat.format == preferredFormat) {
+				selectedFormat = preferredFormat;
+				break;
+			}
 		}
 	}
 
@@ -150,15 +154,15 @@ void RecreateSwapchain(VulkanState* vulkanState) {
 
 void Render(VulkanState* vulkanState) {
 	vk::Fence const fence(*vulkanState->fences[0]);
-	auto _ = vulkanState->device->waitForFences(fence,VK_TRUE,UINT64_MAX);
+	auto _ = vulkanState->device->waitForFences(fence, VK_TRUE, UINT64_MAX);
 	vulkanState->device->resetFences(fence);
 
-	auto [acquireResult,imageIndex] = vulkanState->swapchain->acquireNextImage(UINT64_MAX,vulkanState->imageAvailableSemaphores[0], nullptr);
+	auto [acquireResult, imageIndex] = vulkanState->swapchain->acquireNextImage(UINT64_MAX, vulkanState->imageAvailableSemaphores[0], nullptr);
 	vulkanState->currentSwapchainImageIndex = imageIndex;
 
 	auto const& swapchainImage{ vulkanState->swapchainImages[imageIndex] };
 
-	vk::raii::CommandBuffer const &commandBuffer{ vulkanState->commandBuffers[0] };
+	vk::raii::CommandBuffer const& commandBuffer{ vulkanState->commandBuffers[0] };
 	commandBuffer.reset();
 	vk::CommandBufferBeginInfo beginInfo{};
 	beginInfo.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
@@ -167,7 +171,7 @@ void Render(VulkanState* vulkanState) {
 	auto const time{ static_cast<double>(SDL_GetTicks()) * 0.001 };
 
 	vk::ClearColorValue const color{
-		std::array{static_cast<float>(std::sin(time * 5.0) * 0.5 + 0.5),0.0f,0.0f,1.0f}};
+		std::array{static_cast<float>(std::sin(time * 5.0) * 0.5 + 0.5),0.0f,0.0f,1.0f} };
 
 	// transfer image layout to transfer destination
 	vk::ImageMemoryBarrier const barrier{
@@ -186,7 +190,7 @@ void Render(VulkanState* vulkanState) {
 
 	commandBuffer.clearColorImage(swapchainImage, vk::ImageLayout::eTransferDstOptimal,
 		color,
-		vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor, 0, 1,0,1});
+		vk::ImageSubresourceRange{ vk::ImageAspectFlagBits::eColor, 0, 1,0,1 });
 
 	vk::ImageMemoryBarrier const barrier2{
 		vk::AccessFlagBits::eTransferWrite,vk::AccessFlagBits::eMemoryRead,
@@ -211,7 +215,7 @@ void Render(VulkanState* vulkanState) {
 	constexpr vk::PipelineStageFlags waitStage{ vk::PipelineStageFlagBits::eTransfer };
 	submitInfo.setWaitDstStageMask(waitStage);
 
-	vulkanState->graphicsQueue->submit(submitInfo,fence);
+	vulkanState->graphicsQueue->submit(submitInfo, fence);
 
 	vk::PresentInfoKHR presentInfo{};
 	presentInfo.setSwapchains(**vulkanState->swapchain);
@@ -220,7 +224,6 @@ void Render(VulkanState* vulkanState) {
 	_ = vulkanState->graphicsQueue->presentKHR(presentInfo);
 }
 
-/* This function runs once at startup. */
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 {
 	if (!SDL_Init(SDL_INIT_VIDEO)) {
@@ -244,7 +247,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 
 	auto vulkanVersion{ vulkanState->context->enumerateInstanceVersion() };
 	SDL_Log("Vulkan: %d.%d.%d", VK_VERSION_MAJOR(vulkanVersion), VK_VERSION_MINOR(vulkanVersion), VK_VERSION_PATCH(vulkanVersion));
-	
+
 	InitInstance(vulkanState);
 	InitSurface(vulkanState);
 	PickPhysicalDevice(vulkanState);
@@ -256,28 +259,28 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 
 	return SDL_APP_CONTINUE;
 }
-/* This function runs when a new event (mouse input, keypresses, etc) occurs. */
+
 SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 {
 	auto* vulkanState = static_cast<VulkanState*>(appstate);
 
 	if (event->type == SDL_EVENT_QUIT) {
-		return SDL_APP_SUCCESS;  /* end the program, reporting success to the OS. */
+		return SDL_APP_SUCCESS;
 	}
 	if (event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
 		RecreateSwapchain(vulkanState);
 	}
 	return SDL_APP_CONTINUE;
 }
-/* This function runs once per frame, and is the heart of the program. */
+
 SDL_AppResult SDL_AppIterate(void* appstate)
 {
 	auto* vulkanState = static_cast<VulkanState*>(appstate);
 
 	Render(vulkanState);
-	return SDL_APP_CONTINUE;  /* carry on with the program! */
+	return SDL_APP_CONTINUE;
 }
-/* This function runs once at shutdown. */
+
 void SDL_AppQuit(void* appstate, SDL_AppResult result)
 {
 	auto* vulkanState = static_cast<VulkanState*>(appstate);
