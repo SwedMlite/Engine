@@ -6,10 +6,17 @@
 #include <SDL3/SDL_main.h>
 #include <vulkan/vulkan_raii.hpp>
 #include <optional>
-#include <cmath>
 
 static SDL_Window* window = NULL;
-constexpr auto VULKAN_VERSION{ vk::makeApiVersion(0, 1, 1, 0) };
+
+struct Frame {
+	vk::raii::CommandBuffer commandBuffer;
+	vk::raii::Semaphore imageAvailableSemaphore;
+	vk::raii::Semaphore renderFinishedSemaphore;
+	vk::raii::Fence fence;
+};
+
+constexpr uint32_t IN_FLIGHT_FRAME_COUNT{ 2 };
 
 struct VulkanState {
 	std::optional<vk::raii::Context> context{};
@@ -21,10 +28,8 @@ struct VulkanState {
 	std::optional<vk::raii::Queue> graphicsQueue{};
 
 	std::optional<vk::raii::CommandPool> commandPool{};
-	std::vector<vk::raii::CommandBuffer> commandBuffers{};
-	std::vector<vk::raii::Semaphore> imageAvailableSemaphores{};
-	std::vector<vk::raii::Semaphore> renderFinishedSemaphores{};
-	std::vector<vk::raii::Fence> fences{};
+	std::array<std::optional<Frame>, IN_FLIGHT_FRAME_COUNT> frames{};
+	uint32_t frameIndex{};
 
 	std::optional<vk::raii::SwapchainKHR> swapchain;
 	std::vector<vk::Image> swapchainImages;
@@ -33,31 +38,33 @@ struct VulkanState {
 
 };
 
+void InitFrames(VulkanState* vulkanState) {
+	vk::CommandBufferAllocateInfo allocInfo{};
+	allocInfo.commandPool = *vulkanState->commandPool;
+	allocInfo.level = vk::CommandBufferLevel::ePrimary;
+	allocInfo.commandBufferCount = IN_FLIGHT_FRAME_COUNT;
+
+	auto commandBuffers = vulkanState->device->allocateCommandBuffers(allocInfo);
+
+	for (uint32_t i = 0; i < IN_FLIGHT_FRAME_COUNT; ++i) {
+		vk::FenceCreateInfo fenceInfo{ vk::FenceCreateFlagBits::eSignaled };
+		vk::SemaphoreCreateInfo semaphoreInfo{};
+
+		vulkanState->frames[i].emplace(
+			std::move(commandBuffers[i]),
+			vk::raii::Semaphore(*vulkanState->device, semaphoreInfo),
+			vk::raii::Semaphore(*vulkanState->device, semaphoreInfo),
+			vk::raii::Fence(*vulkanState->device, fenceInfo)
+		);
+	}
+}
+
 void InitSurface(VulkanState* vulkanState) {
 	VkSurfaceKHR raw_surface;
 	if (!SDL_Vulkan_CreateSurface(window, **vulkanState->instance, nullptr, &raw_surface)) {
 		SDL_Log("Failed to create Vulkan surface: %s", SDL_GetError());
 	}
 	vulkanState->surface.emplace(*vulkanState->instance, raw_surface);
-}
-
-void InitSyncObjects(VulkanState* vulkanState) {
-	vk::FenceCreateInfo fenceCreateInfo{};
-	fenceCreateInfo.flags = vk::FenceCreateFlagBits::eSignaled;
-
-	vulkanState->fences.emplace_back(*vulkanState->device, fenceCreateInfo);
-
-	vk::SemaphoreCreateInfo semaphoreCreateInfo{};
-	vulkanState->imageAvailableSemaphores.emplace_back(*vulkanState->device, semaphoreCreateInfo);
-	vulkanState->renderFinishedSemaphores.emplace_back(*vulkanState->device, semaphoreCreateInfo);
-}
-
-void AllocateCommandBuffers(VulkanState* vulkanState) {
-	vk::CommandBufferAllocateInfo allocateInfo{};
-	allocateInfo.commandPool = *vulkanState->commandPool;
-	allocateInfo.commandBufferCount = 1;
-	vulkanState->commandBuffers = vulkanState->device->allocateCommandBuffers(allocateInfo);
-
 }
 
 void InitCommandPool(VulkanState* vulkanState) {
@@ -82,7 +89,6 @@ void InitDevice(VulkanState* vulkanState) {
 
 	vulkanState->device.emplace(*vulkanState->physicalDevice, deviceCreateInfo);
 
-
 	vulkanState->graphicsQueue.emplace(*vulkanState->device, vulkanState->graphicsQueueFamilyIndex, 0);
 }
 
@@ -92,14 +98,14 @@ void PickPhysicalDevice(VulkanState* vulkanState) {
 		SDL_Log("No Vulkan devices found: %s", SDL_GetError());
 	}
 	vulkanState->physicalDevice.emplace(*vulkanState->instance, *physicalDevices.front());
-	SDL_Log("GPU: %s", vulkanState->physicalDevice->getProperties().deviceName.data());
+	SDL_Log("GPU: %s", vulkanState->physicalDevice->getProperties().deviceName);
 	vulkanState->graphicsQueueFamilyIndex = 0;
 }
 
 void InitInstance(VulkanState* vulkanState) {
 
 	vk::ApplicationInfo applicationInfo{};
-	applicationInfo.applicationVersion = VULKAN_VERSION;
+	applicationInfo.apiVersion = vk::makeApiVersion(0, 1, 1, 0);
 
 	vk::InstanceCreateInfo instanceCreateInfo;
 	instanceCreateInfo.pApplicationInfo = &applicationInfo;
@@ -119,24 +125,18 @@ void RecreateSwapchain(VulkanState* vulkanState) {
 	swapchainCreateInfo.surface = *vulkanState->surface;
 	swapchainCreateInfo.minImageCount = surfaceCapabilities.minImageCount + 1;
 
-	const std::vector<vk::Format> preferedSurfaceFormats = {
-		vk::Format::eR8G8B8A8Unorm,
-		vk::Format::eB8G8R8A8Unorm,
-	};
+	std::vector<vk::SurfaceFormatKHR> surfaceFormats =
+		vulkanState->physicalDevice->getSurfaceFormatsKHR(*vulkanState->surface);
+	vk::SurfaceFormatKHR selectedFormat = surfaceFormats[0];
 
-	std::vector<vk::SurfaceFormatKHR> surfaceFormats = vulkanState->physicalDevice->getSurfaceFormatsKHR(*vulkanState->surface);
-	vk::Format selectedFormat = surfaceFormats[0].format;
-
-	for (const auto& availableFormat : surfaceFormats) {
-		for (const auto& preferredFormat : preferedSurfaceFormats) {
-			if (availableFormat.format == preferredFormat) {
-				selectedFormat = preferredFormat;
-				break;
-			}
+	for (const auto& format : surfaceFormats) {
+		if (format.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear) {
+			selectedFormat = format;
+			break;
 		}
 	}
 
-	swapchainCreateInfo.imageFormat = selectedFormat;
+	swapchainCreateInfo.imageFormat = selectedFormat.format;
 	swapchainCreateInfo.imageColorSpace = vk::ColorSpaceKHR::eSrgbNonlinear;
 	swapchainCreateInfo.imageExtent = vulkanState->swapchainExtent;
 	swapchainCreateInfo.imageArrayLayers = 1;
@@ -145,84 +145,107 @@ void RecreateSwapchain(VulkanState* vulkanState) {
 	swapchainCreateInfo.compositeAlpha = vk::CompositeAlphaFlagBitsKHR::eOpaque;
 	swapchainCreateInfo.presentMode = vk::PresentModeKHR::eMailbox;
 	swapchainCreateInfo.clipped = true;
-
-	// todo: figure out why old swapchain handle is invalid
-	// if (swapchain.has_value()) swapchainCreateInfo.oldSwapchain = **swapchain;
+	swapchainCreateInfo.oldSwapchain = nullptr;
 
 	vulkanState->swapchain.emplace(*vulkanState->device, swapchainCreateInfo);
 	vulkanState->swapchainImages = vulkanState->swapchain->getImages();
 }
 
-void Render(VulkanState* vulkanState) {
-	vk::Fence const fence(*vulkanState->fences[0]);
-	auto _ = vulkanState->device->waitForFences(fence, VK_TRUE, UINT64_MAX);
-	vulkanState->device->resetFences(fence);
+void TransitionImageLayout(
+	vk::raii::CommandBuffer const& cmd,
+	vk::Image image,
+	vk::ImageLayout oldLayout,
+	vk::AccessFlags srcAccess,
+	vk::PipelineStageFlags srcStage,
+	vk::ImageLayout newLayout,
+	vk::AccessFlags dstAccess,
+	vk::PipelineStageFlags dstStage
+) {
+	vk::ImageMemoryBarrier barrier{
+		srcAccess, dstAccess,
+		oldLayout, newLayout,
+		VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+		image,
+		vk::ImageSubresourceRange{
+			vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1
+		}
+	};
+	cmd.pipelineBarrier(
+		srcStage, dstStage,
+		{}, {}, {}, barrier
+	);
+}
 
-	auto [acquireResult, imageIndex] = vulkanState->swapchain->acquireNextImage(UINT64_MAX, vulkanState->imageAvailableSemaphores[0], nullptr);
-	vulkanState->currentSwapchainImageIndex = imageIndex;
-
-	auto const& swapchainImage{ vulkanState->swapchainImages[imageIndex] };
-
-	vk::raii::CommandBuffer const& commandBuffer{ vulkanState->commandBuffers[0] };
+void RecordCommandBuffer(vk::raii::CommandBuffer const& commandBuffer, vk::Image const& swapchainImage) {
 	commandBuffer.reset();
-	vk::CommandBufferBeginInfo beginInfo{};
-	beginInfo.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+
+	vk::CommandBufferBeginInfo beginInfo{ vk::CommandBufferUsageFlagBits::eOneTimeSubmit };
 	commandBuffer.begin(beginInfo);
 
-	auto const time{ static_cast<double>(SDL_GetTicks()) * 0.001 };
+	double t = SDL_GetTicks() * 0.001;
+	vk::ClearColorValue clearColor{ std::array<float, 4>{
+		static_cast<float>(SDL_sin(t * 5.0) * 0.5 + 0.5), 0.f, 0.f, 1.f } };
 
-	vk::ClearColorValue const color{
-		std::array{static_cast<float>(std::sin(time * 5.0) * 0.5 + 0.5),0.0f,0.0f,1.0f} };
+	TransitionImageLayout(commandBuffer, swapchainImage,
+		vk::ImageLayout::eUndefined, {}, vk::PipelineStageFlagBits::eTopOfPipe,
+		vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits::eTransferWrite, vk::PipelineStageFlagBits::eTransfer
+	);
 
-	// transfer image layout to transfer destination
-	vk::ImageMemoryBarrier const barrier{
-		vk::AccessFlagBits::eMemoryRead,vk::AccessFlagBits::eTransferWrite,
-		vk::ImageLayout::eUndefined,vk::ImageLayout::eTransferDstOptimal,
-		VK_QUEUE_FAMILY_IGNORED,VK_QUEUE_FAMILY_IGNORED,
-		swapchainImage,vk::ImageSubresourceRange{
-			vk::ImageAspectFlagBits::eColor,0,1,0,1
-	}
-	};
+	commandBuffer.clearColorImage(
+		swapchainImage, vk::ImageLayout::eTransferDstOptimal,
+		clearColor,
+		vk::ImageSubresourceRange{ vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 });
 
-	commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-		vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags{}, nullptr,
-		nullptr, barrier);
-
-
-	commandBuffer.clearColorImage(swapchainImage, vk::ImageLayout::eTransferDstOptimal,
-		color,
-		vk::ImageSubresourceRange{ vk::ImageAspectFlagBits::eColor, 0, 1,0,1 });
-
-	vk::ImageMemoryBarrier const barrier2{
-		vk::AccessFlagBits::eTransferWrite,vk::AccessFlagBits::eMemoryRead,
-		vk::ImageLayout::eTransferDstOptimal,vk::ImageLayout::ePresentSrcKHR,
-		VK_QUEUE_FAMILY_IGNORED,VK_QUEUE_FAMILY_IGNORED,
-		swapchainImage,vk::ImageSubresourceRange{
-			vk::ImageAspectFlagBits::eColor,0,1,0,1
-	}
-	};
-
-	commandBuffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
-		vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags{}, nullptr,
-		nullptr, barrier2);
+	TransitionImageLayout(commandBuffer, swapchainImage,
+		vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits::eTransferWrite, vk::PipelineStageFlagBits::eTransfer,
+		vk::ImageLayout::ePresentSrcKHR, vk::AccessFlagBits::eMemoryRead, vk::PipelineStageFlagBits::eBottomOfPipe
+	);
 
 	commandBuffer.end();
+}
 
+void BeginFrame(VulkanState* state, Frame& frame) {
+	state->device->waitForFences(*frame.fence, VK_TRUE, UINT64_MAX);
+	state->device->resetFences(*frame.fence);
+
+	auto [result, imageIndex] = state->swapchain->acquireNextImage(
+		UINT64_MAX, *frame.imageAvailableSemaphore, nullptr);
+
+	if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
+		RecreateSwapchain(state);
+		return;
+	}
+
+	state->currentSwapchainImageIndex = imageIndex;
+}
+
+void EndFrame(VulkanState* state, Frame& frame) {
+	vk::PresentInfoKHR presentInfo{};
+	presentInfo.setSwapchains(**state->swapchain);
+	presentInfo.setImageIndices(state->currentSwapchainImageIndex);
+	presentInfo.setWaitSemaphores(*frame.renderFinishedSemaphore);
+	state->graphicsQueue->presentKHR(presentInfo);
+
+	state->frameIndex = (state->frameIndex + 1) % IN_FLIGHT_FRAME_COUNT;
+}
+
+void SubmitCommandBuffer(VulkanState* state, Frame& frame) {
 	vk::SubmitInfo submitInfo{};
-	submitInfo.setCommandBuffers(*commandBuffer);
-	submitInfo.setWaitSemaphores(*vulkanState->imageAvailableSemaphores[0]);
-	submitInfo.setSignalSemaphores(*vulkanState->renderFinishedSemaphores[0]);
-
-	constexpr vk::PipelineStageFlags waitStage{ vk::PipelineStageFlagBits::eTransfer };
+	submitInfo.setCommandBuffers(*frame.commandBuffer);
+	submitInfo.setWaitSemaphores(*frame.imageAvailableSemaphore);
+	submitInfo.setSignalSemaphores(*frame.renderFinishedSemaphore);
+	vk::PipelineStageFlags waitStage{ vk::PipelineStageFlagBits::eTransfer };
 	submitInfo.setWaitDstStageMask(waitStage);
 
-	vulkanState->graphicsQueue->submit(submitInfo, fence);
+	state->graphicsQueue->submit(submitInfo, *frame.fence);
+}
 
-	vk::PresentInfoKHR presentInfo{};
-	presentInfo.setSwapchains(**vulkanState->swapchain);
-	presentInfo.setImageIndices(vulkanState->currentSwapchainImageIndex);
-	presentInfo.setWaitSemaphores(*vulkanState->renderFinishedSemaphores[0]);
-	_ = vulkanState->graphicsQueue->presentKHR(presentInfo);
+void Render(VulkanState* state) {
+	auto& frame = *state->frames[state->frameIndex];
+	BeginFrame(state, frame);
+	RecordCommandBuffer(frame.commandBuffer, state->swapchainImages[state->currentSwapchainImageIndex]);
+	SubmitCommandBuffer(state, frame);
+	EndFrame(state, frame);
 }
 
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
@@ -254,8 +277,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 	PickPhysicalDevice(vulkanState);
 	InitDevice(vulkanState);
 	InitCommandPool(vulkanState);
-	AllocateCommandBuffers(vulkanState);
-	InitSyncObjects(vulkanState);
+	InitFrames(vulkanState);
 	RecreateSwapchain(vulkanState);
 
 	return SDL_APP_CONTINUE;
