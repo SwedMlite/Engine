@@ -143,7 +143,7 @@ void RecreateSwapchain(VulkanState* vulkanState) {
 	swapchainCreateInfo.imageUsage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst;
 	swapchainCreateInfo.preTransform = surfaceCapabilities.currentTransform;
 	swapchainCreateInfo.compositeAlpha = vk::CompositeAlphaFlagBitsKHR::eOpaque;
-	swapchainCreateInfo.presentMode = vk::PresentModeKHR::eMailbox;
+	swapchainCreateInfo.presentMode = vk::PresentModeKHR::eImmediate;
 	swapchainCreateInfo.clipped = true;
 	swapchainCreateInfo.oldSwapchain = nullptr;
 
@@ -204,32 +204,27 @@ void RecordCommandBuffer(vk::raii::CommandBuffer const& commandBuffer, vk::Image
 	commandBuffer.end();
 }
 
-void BeginFrame(VulkanState* state, Frame& frame) {
-	state->device->waitForFences(*frame.fence, VK_TRUE, UINT64_MAX);
-	state->device->resetFences(*frame.fence);
+void BeginFrame(VulkanState* vulkanState, Frame& frame) {
+	vulkanState->device->waitForFences(*frame.fence, VK_TRUE, UINT64_MAX);
+	vulkanState->device->resetFences(*frame.fence);
 
-	auto [result, imageIndex] = state->swapchain->acquireNextImage(
-		UINT64_MAX, *frame.imageAvailableSemaphore, nullptr);
+	auto [acquireResult, imageIndex] = vulkanState->swapchain->
+		acquireNextImage(UINT64_MAX, *frame.imageAvailableSemaphore, nullptr);
 
-	if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
-		RecreateSwapchain(state);
-		return;
-	}
-
-	state->currentSwapchainImageIndex = imageIndex;
+	vulkanState->currentSwapchainImageIndex = imageIndex;
 }
 
-void EndFrame(VulkanState* state, Frame& frame) {
+void EndFrame(VulkanState* vulkanState, Frame& frame) {
 	vk::PresentInfoKHR presentInfo{};
-	presentInfo.setSwapchains(**state->swapchain);
-	presentInfo.setImageIndices(state->currentSwapchainImageIndex);
+	presentInfo.setSwapchains(**vulkanState->swapchain);
+	presentInfo.setImageIndices(vulkanState->currentSwapchainImageIndex);
 	presentInfo.setWaitSemaphores(*frame.renderFinishedSemaphore);
-	state->graphicsQueue->presentKHR(presentInfo);
+	vulkanState->graphicsQueue->presentKHR(presentInfo);
 
-	state->frameIndex = (state->frameIndex + 1) % IN_FLIGHT_FRAME_COUNT;
+	vulkanState->frameIndex = (vulkanState->frameIndex + 1) % IN_FLIGHT_FRAME_COUNT;
 }
 
-void SubmitCommandBuffer(VulkanState* state, Frame& frame) {
+void SubmitCommandBuffer(VulkanState* vulkanState, Frame& frame) {
 	vk::SubmitInfo submitInfo{};
 	submitInfo.setCommandBuffers(*frame.commandBuffer);
 	submitInfo.setWaitSemaphores(*frame.imageAvailableSemaphore);
@@ -237,15 +232,15 @@ void SubmitCommandBuffer(VulkanState* state, Frame& frame) {
 	vk::PipelineStageFlags waitStage{ vk::PipelineStageFlagBits::eTransfer };
 	submitInfo.setWaitDstStageMask(waitStage);
 
-	state->graphicsQueue->submit(submitInfo, *frame.fence);
+	vulkanState->graphicsQueue->submit(submitInfo, *frame.fence);
 }
 
-void Render(VulkanState* state) {
-	auto& frame = *state->frames[state->frameIndex];
-	BeginFrame(state, frame);
-	RecordCommandBuffer(frame.commandBuffer, state->swapchainImages[state->currentSwapchainImageIndex]);
-	SubmitCommandBuffer(state, frame);
-	EndFrame(state, frame);
+void Render(VulkanState* vulkanState) {
+	auto& frame = *vulkanState->frames[vulkanState->frameIndex];
+	BeginFrame(vulkanState, frame);
+	RecordCommandBuffer(frame.commandBuffer, vulkanState->swapchainImages[vulkanState->currentSwapchainImageIndex]);
+	SubmitCommandBuffer(vulkanState, frame);
+	EndFrame(vulkanState, frame);
 }
 
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
@@ -270,7 +265,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 	vulkanState->context.emplace(vkGetInstanceProcAddr);
 
 	auto vulkanVersion{ vulkanState->context->enumerateInstanceVersion() };
-	SDL_Log("Vulkan: %d.%d.%d", VK_VERSION_MAJOR(vulkanVersion), VK_VERSION_MINOR(vulkanVersion), VK_VERSION_PATCH(vulkanVersion));
+	SDL_Log("Vulkan: %d.%d.%d", VK_API_VERSION_MAJOR(vulkanVersion), VK_API_VERSION_MINOR(vulkanVersion), VK_API_VERSION_PATCH(vulkanVersion));
 
 	InitInstance(vulkanState);
 	InitSurface(vulkanState);
@@ -285,22 +280,18 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 
 SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
 {
-	auto* vulkanState = static_cast<VulkanState*>(appstate);
-
 	if (event->type == SDL_EVENT_QUIT) {
 		return SDL_APP_SUCCESS;
 	}
 	if (event->type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED) {
-		RecreateSwapchain(vulkanState);
+		RecreateSwapchain(static_cast<VulkanState*>(appstate));
 	}
 	return SDL_APP_CONTINUE;
 }
 
 SDL_AppResult SDL_AppIterate(void* appstate)
 {
-	auto* vulkanState = static_cast<VulkanState*>(appstate);
-
-	Render(vulkanState);
+	Render(static_cast<VulkanState*>(appstate));
 	return SDL_APP_CONTINUE;
 }
 
@@ -308,7 +299,12 @@ void SDL_AppQuit(void* appstate, SDL_AppResult result)
 {
 	auto* vulkanState = static_cast<VulkanState*>(appstate);
 
-	vulkanState->device->waitIdle();
+	if (vulkanState->device) {
+		vulkanState->device->waitIdle();
+	}
+
+	delete vulkanState;
+
 	SDL_Vulkan_UnloadLibrary();
 	SDL_Quit();
 }
