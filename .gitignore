@@ -1,0 +1,6 @@
+.vs
+out
+Engine-Android/.idea
+Engine-Android/.gradle
+Engine-Android/app/.cxx
+Engine-Android/app/build
