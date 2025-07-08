@@ -19,7 +19,11 @@ android {
             }
         }
     }
-
+	sourceSets {
+        main {
+            assets.srcDirs = ['../assets']
+        }
+    }
     externalNativeBuild {
         cmake {
             path '../../CMakeLists.txt'
